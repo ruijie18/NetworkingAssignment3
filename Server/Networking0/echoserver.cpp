@@ -83,28 +83,28 @@ struct JoinRequestPacket {
 
 struct JoinAcceptPacket {
     uint8_t type = JOIN_ACCEPT;
-    uint32_t playerId;
+    uint32_t playerId=0;
 };
 
 struct PlayerUpdatePacket {
     uint8_t type = PLAYER_UPDATE;
-    uint32_t playerId;
-    float pos_x;
-    float pos_y;
-    float angle;   // Orientation in radians.
-    float vel_x;   // Linear velocity X.
-    float vel_y;   // Linear velocity Y.
+    uint32_t playerId = 0;
+    float pos_x = 0.0f;
+    float pos_y = 0.0f;
+    float angle = 0.0f;    // Initial orientation (facing right)
+    float vel_x = 0.0f;    // Stationary by default
+    float vel_y = 0.0f;
 };
 
 struct BulletSpawnPacket {
     uint8_t type = BULLET_SPAWN;
-    uint32_t playerId;   // Owner of the bullet.
-    uint8_t bulletType;  // e.g., 0 = standard.
-    float pos_x;
-    float pos_y;
-    float vel_x;
-    float vel_y;
-    float damage;
+    uint32_t playerId = 0;      // Invalid ID by default
+    uint8_t bulletType = 0;     // Standard bullet type
+    float pos_x = 0.0f;
+    float pos_y = 0.0f;
+    float vel_x = 0.0f;
+    float vel_y = 0.0f;
+    float damage = 10.0f;
 };
 
 struct BulletSpawnMultiPacket {
@@ -115,6 +115,7 @@ struct BulletSpawnMultiPacket {
 };
 
 struct GameObjectData {
+<<<<<<< Updated upstream
     uint8_t objectType; // 0 = Player, 1 = Asteroid, 2 = Bullet.
     uint32_t playerId;  // For players; 0 for others.
     float pos_x;
@@ -125,6 +126,18 @@ struct GameObjectData {
     float vel_y;
     uint32_t entityId;
     bool isActive = true;
+=======
+    uint8_t objectType = 0;      // 0=Player, 1=Asteroid, 2=Bullet
+    uint32_t playerId = 0;       // 0 for non-player objects
+    float pos_x = 0.0f;
+    float pos_y = 0.0f;
+    float rotation = 0.0f;       // Initial orientation (radians)
+    float scale = 1.0f;          // Default scale factor
+    float vel_x = 0.0f;          // Stationary by default
+    float vel_y = 0.0f;
+    uint32_t asteroidId = 0;     // 0 for non-asteroids
+    bool isActive = true;        // Active by default
+>>>>>>> Stashed changes
 };
 
 struct GameUpdatePacket 
@@ -288,7 +301,7 @@ void relayBulletSpawnMulti(const BulletSpawnMultiPacket* multiPkt, size_t packet
     {
         int bytesSent = sendto(g_serverSocket,
             reinterpret_cast<const char*>(multiPkt),
-            packetSize,
+            static_cast<int>(sizeof(BulletSpawnMultiPacket)),
             0,
             reinterpret_cast<const sockaddr*>(&addr),
             sizeof(addr));

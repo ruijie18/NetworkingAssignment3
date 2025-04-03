@@ -107,13 +107,14 @@ struct PlayerUpdatePacket {
 // Bullet spawn packet: sent once when the client spawns a bullet.
 struct BulletSpawnPacket {
     uint8_t type = BULLET_SPAWN;
-    uint32_t playerId; // Owner's ID.
-    uint8_t bulletType; // Bullet type identifier.
-    float pos_x;
-    float pos_y;
-    float vel_x;
-    float vel_y;
-    float damage;
+    uint32_t playerId = 0;       // Owner's ID.
+    uint8_t bulletType = 0;      // Bullet type identifier.
+    float pos_x = 0.0f;
+    float pos_y = 0.0f;
+    float vel_x = 0.0f;
+    float vel_y = 0.0f;
+    float damage = 0.0f;
+
 };
 
 struct BulletSpawnMultiPacket {
@@ -145,11 +146,10 @@ struct GameUpdatePacket {
 
 struct ScoreIncrementPacket {
     uint8_t type = SCORE_INCREMENT;
-    uint32_t playerId;
-    uint32_t increment;
-    uint32_t entityId;
+    uint32_t playerId = 0;
+    uint32_t increment = 0;
+    uint32_t entityId = 0;
 };
-
 struct PlayerScore {
     uint32_t playerId;
     uint32_t score;
@@ -209,7 +209,7 @@ std::mutex destroyedMutex;
 // ----------------------------------------------------------------------
 struct GameObject
 {
-    AEMtx33 transform;  // For rendering.
+    AEMtx33 transform = { 0 };  // For rendering.
     float pos_x = 0.0f, pos_y = 0.0f;
     float vel_x = 0.0f, vel_y = 0.0f;
     float scale = 1.0f;
@@ -1093,6 +1093,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
+    //_CrtSetBreakAlloc(342);
     AllocConsole();
     FILE* fp;
     freopen_s(&fp, "CONOUT$", "w", stdout);

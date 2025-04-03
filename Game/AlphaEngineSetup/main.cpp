@@ -1,7 +1,7 @@
 ﻿/*
  *****************************************************************
  *  File:      client.cpp
- *  Author:    Joshua Sim Yue Chen
+ *  Author:    Joshua Sim Yue Chen (modified by ChatGPT)
  *  Brief:     Implements the client for the asteroid shooter.
  *             The client computes its own ship movement using
  *             simplified physics (client-side prediction) and
@@ -28,7 +28,6 @@
 #include <map>
 #include <algorithm>
 #include <string>
-#include <set>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -36,16 +35,18 @@
 constexpr uint16_t SERVER_PORT = 9000;
 constexpr int CLIENT_PORT_START = 9001;
 constexpr int BUFFER_SIZE = 4096;
-constexpr int MAX_REMOTE_OBJECTS = 256;  // Objects coming from the server. // Anything above 256 is considered as cached or fake entities that server does not know, hence the mismatch
-constexpr int MAX_LOCAL_ENTITIES = 100;     // Local pool for bullets, power-ups, etc.
-constexpr int MAX_LOCAL_ENTITIES_SPAWN_RATE = 10;
+constexpr int MAX_REMOTE_OBJECTS = 8000;  // Objects coming from the server. // Anything above 5000 is considered as cached or fake entities that server does not know, hence the mismatch
+constexpr int MAX_REMOTE_BULLETS = 3000;    // Maximum number of bullet entities.
+constexpr int MAX_LOCAL_ENTITIES = 500;     // Local pool for bullets, power-ups, etc.
+constexpr int MAX_LOCAL_ENTITIES_SPAWN_RATE = 10; 
 constexpr int MAX_PLAYERS = 4000; // Maximum number for score-count
-constexpr int VICTORY_SCORE = 50; // Client based intended
+bool gGameRunning{};
+
 
 #pragma region Helper Func
-// ----------------------------------------------------------------------
-// Helper: Linear Interpolation Function
-// ----------------------------------------------------------------------
+ // ----------------------------------------------------------------------
+ // Helper: Linear Interpolation Function
+ // ----------------------------------------------------------------------
 inline float Lerp(float a, float b, float t)
 {
     return a + (b - a) * t;
@@ -136,7 +137,6 @@ struct ScoreIncrementPacket {
     uint8_t type = SCORE_INCREMENT;
     uint32_t playerId;
     uint32_t increment;
-    uint32_t asteroidId;
 };
 
 struct PlayerScore {
@@ -159,7 +159,6 @@ struct ScoreUpdatePacket {
 // Global Networking Variables
 // ----------------------------------------------------------------------
 std::atomic<bool> running{ true };
-std::atomic<bool> gGameRunning{ true };
 uint32_t myPlayerId = 0;
 SOCKET udpSocket = INVALID_SOCKET;
 sockaddr_in serverAddr{};
@@ -168,28 +167,11 @@ sockaddr_in serverAddr{};
 std::map<uint32_t, uint32_t> gScoreBoard;
 std::mutex gScoreMutex;
 
-// Game State 
-enum GameState {
-    Playing,
-    Pause,
-    Win
-};
-
-GameState gameState = Playing; // Defaults allows simulation, etc
-
-
-// Animation Client Variables
-float scoreboardAnimTimer = 0.0f;
-const float scoreboardAnimDuration = 1.5f; // seconds
-
-// Destroyed Asteroids
-std::set<uint32_t> destroyedAsteroidIds;
-std::mutex destroyedMutex;
 
 // ----------------------------------------------------------------------
 // Entity Structures & Pools
 // ----------------------------------------------------------------------
-struct GameObject
+struct GameObject 
 {
     AEMtx33 transform;  // For rendering.
     float pos_x = 0.0f, pos_y = 0.0f;
@@ -198,11 +180,11 @@ struct GameObject
     float rotation = 0.0f;
     uint8_t objectType = 0; // Use Object Type
     uint32_t playerId = 0;  // Valid for player objects.
-    uint32_t asteroidId = 0;
+
     bool isSent = false;
 };
 
-enum ObjectType
+enum ObjectType 
 {
     Player,
     Asteroid,
@@ -253,24 +235,15 @@ void SpawnLocalEntity(uint8_t objectType, float pos_x, float pos_y, float vel_x,
     if (gLocalEntityCount >= MAX_LOCAL_ENTITIES)
         return; // Pool full.
 
-    // Find an inactive object in the pool
-    for (uint32_t i = 0; i < MAX_LOCAL_ENTITIES; ++i)
-    {
-        if (!gLocalEntities[i].isActive)  // Reuse an inactive slot
-        {
-            GameObject& obj = gLocalEntities[i];
-            obj.objectType = objectType;
-            obj.playerId = myPlayerId;
-            obj.pos_x = pos_x;
-            obj.pos_y = pos_y;
-            obj.vel_x = vel_x;
-            obj.vel_y = vel_y;
-            obj.rotation = rotation;
-            obj.scale = scale;
-            obj.isActive = true;  // Mark as active
-            return;
-        }
-    }
+    GameObject& obj = gLocalEntities[gLocalEntityCount++];
+    obj.objectType = objectType;
+    obj.playerId = myPlayerId;  // For example, associate with the local player.
+    obj.pos_x = pos_x;
+    obj.pos_y = pos_y;
+    obj.vel_x = vel_x;
+    obj.vel_y = vel_y;
+    obj.rotation = rotation;
+    obj.scale = scale;
 }
 
 // ----------------------------------------------------------------------
@@ -307,14 +280,12 @@ void SpawnBullet()
 // ----------------------------------------------------------------------
 //  Score Increment Function
 // ----------------------------------------------------------------------
-void ReportScoreUpdate(uint32_t playerId, uint32_t points, uint32_t asteroidIndex)
+void ReportScoreUpdate(uint32_t playerId, uint32_t points)
 {
     ScoreIncrementPacket pkt;
     pkt.type = SCORE_INCREMENT;
     pkt.playerId = playerId;
     pkt.increment = points;
-    pkt.asteroidId = asteroidIndex;
-
 
     int sent = sendto(udpSocket, reinterpret_cast<char*>(&pkt), sizeof(pkt), 0,
         reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
@@ -326,9 +297,14 @@ void ReportScoreUpdate(uint32_t playerId, uint32_t points, uint32_t asteroidInde
 // ----------------------------------------------------------------------
 //  Scoreboard render function
 // ----------------------------------------------------------------------
-
-void RenderScoreboardText(int Location = 0)
+void RenderScoreboardText()
 {
+    // Header
+    const char* headerText = "Scoreboard";
+    f32 w = 1.0f, h = 1.0f;
+    AEGfxGetPrintSize(pFont, headerText, 0.5f, &w, &h);
+    AEGfxPrint(pFont, headerText, 1.0f - w - 0.05f, 1.0f - h - 0.05f, 0.5f, 1, 1, 1, 1);
+
     // Lock and copy the current scoreboard
     std::vector<std::pair<uint32_t, uint32_t>> sortedScores;
     {
@@ -342,35 +318,6 @@ void RenderScoreboardText(int Location = 0)
             return a.second > b.second;
         });
 
-    // Header
-    const char* headerText = "";
-
-    if (Location == 1) {
-        headerText = "Final Scoreboard";
-    }
-    else {
-        headerText = "Scoreboard";
-    }
-
-    f32 w = 1.0f, h = 1.0f;
-    AEGfxGetPrintSize(pFont, headerText, 0.5f, &w, &h);
-
-    // Center Y for win screen display
-// Center Y for win screen display
-    float startY = 1.2f; // Start off-screen above
-    float endY = 0.1f;   // Final resting Y center offset
-
-    float animT = scoreboardAnimTimer / scoreboardAnimDuration;
-    if (animT > 1.0f) animT = 1.0f;
-
-    float centerYOffset = Lerp(startY, endY, animT);
-
-
-    float baseX = (Location == 1) ? -w / 2.0f : 1.0f - w - 0.05f;
-    float baseY = (Location == 1) ? centerYOffset : 1.0f - h - 0.05f;
-
-    AEGfxPrint(pFont, headerText, baseX, baseY, 0.5f, 1, 1, 1, 1);
-
     // Render top N players
     const int maxEntries = 6;
     int entryCount = static_cast<int>(sortedScores.size());
@@ -380,26 +327,14 @@ void RenderScoreboardText(int Location = 0)
         uint32_t playerId = entry.first;
         uint32_t score = entry.second;
 
-        // Customize display for top player
-        std::string line;
-        if (i == 0)  // Top scorer
-            line = "P" + std::to_string(playerId) + " : " + std::to_string(score);
-        else
-            line = "P" + std::to_string(playerId) + " : " + std::to_string(score);
-
+        std::string line = "P" + std::to_string(playerId) + " : " + std::to_string(score);
         const char* txt = line.c_str();
         f32 lineW = 1.0f, lineH = 1.0f;
         AEGfxGetPrintSize(pFont, txt, 0.5f, &lineW, &lineH);
 
-        float textX = (Location == 1) ? -lineW / 2.0f : 1.0f - lineW - 0.05f;
-        float textY = baseY - ((i + 1) * 0.07f);
-
-        // Set color: gold for winner, white for others
-        if (i == 0)
-            AEGfxPrint(pFont, txt, textX, textY, 0.5f, 1.0f, 0.84f, 0.0f, 1);  // Gold
-        else
-            AEGfxPrint(pFont, txt, textX, textY, 0.5f, 1, 1, 1, 1);
+        AEGfxPrint(pFont, txt, 1.0f - lineW - 0.05f, 1.0f - lineH - 0.05f - ((i + 1) * 0.07f), 0.5f, 1, 1, 1, 1);
     }
+
 
 }
 
@@ -482,96 +417,9 @@ void UpdateLocalSimulation(float dt)
 
     //Score increment
     if (AEInputCheckTriggered(AEVK_1)) {
-        ReportScoreUpdate(myPlayerId, 10, 0);  // +10 points test
+        ReportScoreUpdate(myPlayerId, 10);  // +10 points test
     }
     // Here you could add more input-handling for other local-spawnable entities.
-}
-
-// ----------------------------------------------------------------------
-// Handle Collision Logic
-// ----------------------------------------------------------------------
-void HandleCollisionChecks()
-{
-    std::lock_guard<std::mutex> lock(gPoolMutex);
-
-    for (uint32_t i = 0; i < MAX_REMOTE_OBJECTS; i++)
-    {
-        if (!gServerEntityPool[i].isActive)
-            continue;
-
-#pragma region With Player
-#if 1
-        if (checkSphereCollision(
-            gServerEntityPool[i].pos_x, gServerEntityPool[i].pos_y, gServerEntityPool[i].scale * 0.5f,
-            gLocalPlayer.pos_x, gLocalPlayer.pos_y, gLocalPlayer.scale * 0.5f))
-        {
-            // Handle player collision
-        }
-#endif
-#pragma endregion
-
-#pragma region With Master Client Bullets
-#if 1
-        for (uint32_t j = 0; j < MAX_LOCAL_ENTITIES; j++)
-        {
-            if (!gLocalEntities[j].isActive)
-                continue;
-
-            if (checkSphereCollision(
-                gServerEntityPool[i].pos_x, gServerEntityPool[i].pos_y, gServerEntityPool[i].scale * 0.5f,
-                gLocalEntities[j].pos_x, gLocalEntities[j].pos_y, gLocalEntities[j].scale * 0.5f))
-            {
-                if (gServerEntityPool[i].objectType == ObjectType::Asteroid)
-                {
-                    gLocalEntities[j].isActive = false;
-
-                    uint32_t asteroidId = gServerEntityPool[i].asteroidId;
-
-                    std::lock_guard<std::mutex> dlock(destroyedMutex);
-                    if (destroyedAsteroidIds.count(asteroidId))
-                        continue; // Already destroyed
-
-                    destroyedAsteroidIds.insert(asteroidId);
-                    ReportScoreUpdate(myPlayerId, 10, asteroidId);
-
-
-                    std::cout << "[LOCAL] Asteroid with ID " << asteroidId << " destroyed by local bullet\n";
-                }
-            }
-        }
-#endif
-#pragma endregion
-
-#pragma region With Each Other (different objs from server)
-#if 1
-        for (uint32_t j = 0; j < i; j++) // Prevent self-collision by iterating only to i.
-        {
-            if (!gServerEntityPool[j].isActive)
-                continue;
-
-            if (checkSphereCollision(
-                gServerEntityPool[i].pos_x, gServerEntityPool[i].pos_y, gServerEntityPool[i].scale * 0.5f,
-                gServerEntityPool[j].pos_x, gServerEntityPool[j].pos_y, gServerEntityPool[j].scale * 0.5f))
-            {
-                // Handle server object collision
-            }
-        }
-
-        for (uint32_t j = MAX_REMOTE_OBJECTS / 2; j < MAX_REMOTE_OBJECTS; j++)
-        {
-            if (!gServerEntityPool[j].isActive)
-                continue;
-
-            if (checkSphereCollision(
-                gServerEntityPool[i].pos_x, gServerEntityPool[i].pos_y, gServerEntityPool[i].scale * 0.5f,
-                gServerEntityPool[j].pos_x, gServerEntityPool[j].pos_y, gServerEntityPool[j].scale * 0.5f))
-            {
-                // Handle fake bullet collision
-            }
-        }
-#endif
-#pragma endregion
-    }
 }
 #pragma endregion
 
@@ -614,13 +462,7 @@ void ReceiveThread(SOCKET socket)
                 count = MAX_REMOTE_OBJECTS;
 
             std::lock_guard<std::mutex> lock(gPoolMutex);
-            // Mark entire remote pool as inactive first.
-            for (uint32_t i = 0; i < MAX_REMOTE_OBJECTS; i++)
-            {
-                gServerEntityPool[i].isActive = false;
-            }
-            // Fill pool with new updates.
-            uint32_t poolIndex = 0;
+            uint32_t remoteIndex = 0;
             for (uint32_t i = 0; i < count; i++)
             {
                 const GameObjectData& src = update->objects[i];
@@ -630,8 +472,6 @@ void ReceiveThread(SOCKET socket)
                 // Skip bullet updates from local player; local bullets are managed locally.
                 if (src.objectType == ObjectType::Bullet && src.playerId == myPlayerId)
                     continue;
-                if (poolIndex >= MAX_REMOTE_OBJECTS)
-                    break;
 
                 gServerEntityPool[remoteIndex].pos_x = src.pos_x;
                 gServerEntityPool[remoteIndex].pos_y = src.pos_y;
@@ -643,7 +483,7 @@ void ReceiveThread(SOCKET socket)
                 gServerEntityPool[remoteIndex].vel_y = src.vel_y;
                 remoteIndex++;
             }
-            // (Optional) You can store poolIndex somewhere if needed.
+            gRemoteCount.store(remoteIndex);
         }
         // In your ReceiveThread function, add the BULLET_SPAWN case:
         else if (packetType == BULLET_SPAWN)
@@ -664,8 +504,7 @@ void ReceiveThread(SOCKET socket)
                     // Process each bullet in the multi-packet.
                     for (uint32_t i = 0; i < multiPkt->count; i++)
                     {
-                        if (multiPkt->bullets[i].playerId == myPlayerId)
-                            break; // Avoid spawning on master client that has spawned this to begin with
+                        if (multiPkt->bullets[i].playerId == myPlayerId) break; //avoid spawning on master client that has spawned this to begin with
 
                         // Calculate the bullet’s angle from its velocity.
                         float angle = atan2f(multiPkt->bullets[i].vel_y, multiPkt->bullets[i].vel_x);
@@ -680,20 +519,10 @@ void ReceiveThread(SOCKET socket)
                         bullet.vel_y = multiPkt->bullets[i].vel_y;
                         bullet.rotation = angle;
                         bullet.scale = 100.0f;          // Adjust scale as desired.
-                        bullet.isActive = true;         // Mark bullet as active.
 
-                        // Search for an inactive bullet slot in the designated bullet region of gServerEntityPool.
-                        int bulletIndex = -1;
-                        for (int i = MAX_REMOTE_OBJECTS / 2; i < MAX_REMOTE_OBJECTS; i++)
-                        {
-                            if (!gServerEntityPool[i].isActive)
-                            {
-                                bulletIndex = i;
-                                break;
-                            }
-                        }
-
-                        if (bulletIndex != -1)
+                        // Compute the insertion index in the global pool:
+                        int bulletIndex = (MAX_REMOTE_OBJECTS / 2) + gBulletEntityCount.fetch_add(1);
+                        if (bulletIndex < MAX_REMOTE_OBJECTS)
                         {
                             std::lock_guard<std::mutex> lock(gPoolMutex);
                             gServerEntityPool[bulletIndex] = bullet;
@@ -718,21 +547,16 @@ void ReceiveThread(SOCKET socket)
         else if (packetType == SCORE_UPDATE)
         {
             ScoreUpdatePacket* pkt = reinterpret_cast<ScoreUpdatePacket*>(buffer);
-
             std::lock_guard<std::mutex> lock(gScoreMutex);
             gScoreBoard.clear();
-
-            uint32_t highestScore = 0;
             for (uint32_t i = 0; i < pkt->scoreCount; ++i) {
                 gScoreBoard[pkt->scores[i].playerId] = pkt->scores[i].score;
-                if (pkt->scores[i].score > highestScore)
-                    highestScore = pkt->scores[i].score;
             }
 
-            // Win condition check (e.g., 500 points)
-            if (highestScore >= VICTORY_SCORE && gameState == GameState::Playing) {
-                gameState = GameState::Win;
-                std::cout << "[GAME STATE] Game over! A player has reached 500 points.\n";
+            // Optional: Console debug display
+            std::cout << "\n== LIVE SCOREBOARD ==\n";
+            for (const auto& pair : gScoreBoard) {
+                std::cout << "Player " << pair.first << ": " << pair.second << "\n";
             }
 
             std::cout << "=====================\n";
@@ -778,9 +602,7 @@ void SendLocalUpdate(int clientId)
         std::lock_guard<std::mutex> lock(gPoolMutex);
         for (uint32_t i = 0; i < gLocalEntityCount && multiPkt.count < 10; i++)
         {
-            if (gLocalEntities[i].objectType == ObjectType::Bullet &&
-                gLocalEntities[i].isActive &&
-                !gLocalEntities[i].isSent)
+            if (gLocalEntities[i].objectType == ObjectType::Bullet && !gLocalEntities[i].isSent)
             {
                 // Prepare the bullet spawn data.
                 multiPkt.bullets[multiPkt.count].playerId = myPlayerId;
@@ -826,8 +648,8 @@ void UpdateRemoteInterpolation(float dt)
     const float extrapolationFactor = 1.0f; // Predict 1 second ahead.
 
     std::lock_guard<std::mutex> lock(gPoolMutex);
-    // Process non-bullet remote objects (assumed in first half of pool).
-    for (uint32_t i = 0; i < MAX_REMOTE_OBJECTS / 2; i++)
+    uint32_t remoteCount = gRemoteCount.load();
+    for (uint32_t i = 0; i < remoteCount; i++)
     {
         float targetPosX = gServerEntityPool[i].pos_x + gServerEntityPool[i].vel_x * extrapolationFactor;
         float targetPosY = gServerEntityPool[i].pos_y + gServerEntityPool[i].vel_y * extrapolationFactor;
@@ -852,14 +674,14 @@ void UpdateRemoteInterpolation(float dt)
         gRemoteEntities[i].playerId = gServerEntityPool[i].playerId;
         gRemoteEntities[i].vel_x = gServerEntityPool[i].vel_x;
         gRemoteEntities[i].vel_y = gServerEntityPool[i].vel_y;
-        gRemoteEntities[i].asteroidId = gServerEntityPool[i].asteroidId;
     }
 
-    // Update bullet objects by simply adding velocity to position.
+    // Update bullets by simply adding velocity to position.
     int bulletStartIndex = MAX_REMOTE_OBJECTS / 2;
-    for (int i = bulletStartIndex; i < MAX_REMOTE_OBJECTS; i++)
+    int bulletCount = gBulletEntityCount.load();
+
+    for (int i = bulletStartIndex; i < bulletStartIndex + bulletCount; i++)
     {
-        if (!gServerEntityPool[i].isActive) continue;
         gServerEntityPool[i].pos_x += gServerEntityPool[i].vel_x * dt;
         gServerEntityPool[i].pos_y += gServerEntityPool[i].vel_y * dt;
     }
@@ -888,9 +710,6 @@ void Render()
     // Render local entities (bullets, etc.).
     for (uint32_t i = 0; i < gLocalEntityCount; i++)
     {
-        if (!gLocalEntities[i].isActive)
-            continue;
-
         AEMtx33 scaleMtx, rotMtx, transMtx, finalMtx;
         AEMtx33Scale(&scaleMtx, gLocalEntities[i].scale, gLocalEntities[i].scale);
         AEMtx33Rot(&rotMtx, gLocalEntities[i].rotation + (3.1415926f / 2.0f));
@@ -898,22 +717,18 @@ void Render()
         AEMtx33Concat(&finalMtx, &rotMtx, &scaleMtx);
         AEMtx33Concat(&finalMtx, &transMtx, &finalMtx);
 
-#pragma region Texture Selection for Local Entities
-#if 1
         // Choose texture based on object type.
         if (gLocalEntities[i].objectType == ObjectType::Bullet) // Bullet.
             AEGfxTextureSet(BulletTexture, 0, 0);
         else
             AEGfxTextureSet(AsteroidTexture, 0, 0); // Or any other texture for other entity types.
-#endif
-#pragma endregion
-
         AEGfxSetTransform(finalMtx.m);
         AEGfxMeshDraw(pMesh, AE_GFX_MDM_TRIANGLES);
     }
 
-    // Render remote entities (non-bullets) from first half of remote pool.
-    for (uint32_t i = 0; i < MAX_REMOTE_OBJECTS / 2; i++)
+    // Render remote entities.
+    uint32_t remoteCount = gRemoteCount.load();
+    for (uint32_t i = 0; i < remoteCount; i++)
     {
         AEMtx33 scaleMtx, rotMtx, transMtx, finalMtx;
         AEMtx33Scale(&scaleMtx, gRemoteEntities[i].scale, gRemoteEntities[i].scale);
@@ -940,11 +755,9 @@ void Render()
 
     // Render bullet entities from the global pool (second half).
     int bulletStartIndex = MAX_REMOTE_OBJECTS / 2;
-    for (int i = bulletStartIndex; i < MAX_REMOTE_OBJECTS; i++)
+    int bulletCount = gBulletEntityCount.load();
+    for (int i = bulletStartIndex; i < bulletStartIndex + bulletCount; i++)
     {
-        if (!gServerEntityPool[i].isActive)
-            continue;
-
         AEMtx33 scaleMtx, rotMtx, transMtx, finalMtx;
         AEMtx33Scale(&scaleMtx, gServerEntityPool[i].scale, gServerEntityPool[i].scale);
         AEMtx33Rot(&rotMtx, gServerEntityPool[i].rotation + (3.1415926f / 2.0f));
@@ -959,14 +772,6 @@ void Render()
     }
     RenderScoreboardText();
 }
-
-void RenderWinScreen()
-{
-    std::lock_guard<std::mutex> lock(gPoolMutex);
-
-    RenderScoreboardText(1); // 1 Renders to middle, 0 renders top right for in-game
-}
-
 #pragma endregion
 
 #pragma region DO NOT TOUCH

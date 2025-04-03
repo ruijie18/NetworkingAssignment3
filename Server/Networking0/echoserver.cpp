@@ -73,7 +73,6 @@ enum PacketType : uint8_t
     DISCONNECT = 0x10,
     NAME_REJECTED = 0x11   // ✅ new packet type
 };
-
 #pragma pack(push, 1)
 struct JoinRequestPacket {
     uint8_t type = JOIN_REQUEST;
@@ -122,19 +121,21 @@ struct GameObjectData {
     float scale;
     float vel_x;
     float vel_y;
+    uint32_t asteroidId;
+    bool isActive = true;
 };
 
-struct GameUpdatePacket {
+struct GameUpdatePacket 
+{
     uint8_t type = GAME_UPDATE;
     uint32_t objectCount;
-    // Only players and asteroids are broadcast here.
-    GameObjectData objects[256]; // Legacy placeholder.
 };
 
 struct ScoreIncrementPacket {
     uint8_t type;
     uint32_t playerId;
     uint32_t increment;
+    uint32_t asteroidId; // 👈 Add this
 };
 
 struct PlayerScore {
@@ -178,6 +179,8 @@ struct AsteroidEntity {
     float scale;
     float vel_x, vel_y;
     int health;
+    uint32_t id;
+    bool isActive = true;
 };
 
 struct BulletEntity {
@@ -210,6 +213,8 @@ std::map<uint32_t, uint32_t> gScoreBoard;
 std::mutex gScoreMutex;
 
 SOCKET g_serverSocket = INVALID_SOCKET;
+
+std::atomic<uint32_t> nextAsteroidId{1};
 
 #pragma endregion
 
@@ -258,7 +263,9 @@ void spawnAsteroid()
     asteroid.vel_y = sinf(asteroid.rotation) * speed;
 
     std::lock_guard<std::mutex> lock(gameStateMutex);
+    asteroid.id = nextAsteroidId++;
     asteroids.push_back(asteroid);
+
 }
 
 // Relay the multi bullet packet to all connected clients.
@@ -339,11 +346,15 @@ void broadcastGameState()
             data.scale = p.scale;
             data.vel_x = p.vel_x;
             data.vel_y = p.vel_y;
+            data.isActive = true;
             gameObjects.push_back(data);
         }
         // Pack asteroids.
         for (const auto& ast : asteroids)
         {
+            if (!ast.isActive)
+                continue;
+
             GameObjectData data;
             data.objectType = static_cast<uint8_t>(Asteroid);
             data.playerId = 0;
@@ -353,6 +364,8 @@ void broadcastGameState()
             data.scale = ast.scale;
             data.vel_x = ast.vel_x;
             data.vel_y = ast.vel_y;
+            data.isActive = true;
+            data.asteroidId = ast.id;
             gameObjects.push_back(data);
         }
     }
@@ -444,7 +457,7 @@ void broadcastScoreUpdate()
 }
 
 //This is essentially Update()
-void gameLoop()
+void gameLoop() 
 {
     const float dtFixed = UPDATE_RATE;
     float accumulator = 0.0f;
@@ -583,10 +596,24 @@ void handleScoreRequest(const char* buffer, int bytesReceived, const sockaddr_in
             << " (Total: " << gScoreBoard[pkt->playerId] << ")\n";
     }
 
+    {
+        uint32_t idToDestroy = pkt->asteroidId;
+
+        std::lock_guard<std::mutex> lock(gameStateMutex);
+        for (auto& asteroid : asteroids)
+        {
+            if (asteroid.isActive && asteroid.id == idToDestroy)
+            {
+                asteroid.isActive = false;
+                std::cout << "[SERVER] Destroyed asteroid ID " << idToDestroy << " from player " << pkt->playerId << "\n";
+                break;
+            }
+        }
+    }
+
     // Safe because broadcastScoreUpdate locks internally
     broadcastScoreUpdate();
 }
-
 
 void handlePlayerUpdate(const PlayerUpdatePacket* updatePkt)
 {
@@ -662,13 +689,13 @@ void serverReceiveLoop(SOCKET serverSocket)
                     std::cerr << "[WARN] Incomplete or invalid multi bullet packet received." << std::endl;
                 }
             }
-            else
+
+            if (bytesReceived >= sizeof(BulletSpawnPacket))
             {
                 std::cerr << "[WARN] Received bullet spawn packet with insufficient size." << std::endl;
             }
             break;
         }
-
         case SCORE_INCREMENT:
             handleScoreRequest(buffer, bytesReceived, clientAddr);
             break;
@@ -772,4 +799,4 @@ int main()
     WSACleanup();
     return 0;
 }
-#pragma endregion
+#pragma endregion   

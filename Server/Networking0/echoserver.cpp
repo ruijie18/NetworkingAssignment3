@@ -121,14 +121,13 @@ struct GameObjectData {
     float scale;
     float vel_x;
     float vel_y;
-    uint32_t asteroidId;
-    bool isActive = true;
 };
 
-struct GameUpdatePacket 
-{
+struct GameUpdatePacket {
     uint8_t type = GAME_UPDATE;
     uint32_t objectCount;
+    // Only players and asteroids are broadcast here.
+    GameObjectData objects[4000]; // Legacy placeholder.
 };
 
 struct ScoreIncrementPacket {
@@ -179,8 +178,6 @@ struct AsteroidEntity {
     float scale;
     float vel_x, vel_y;
     int health;
-    uint32_t id;
-    bool isActive = true;
 };
 
 struct BulletEntity {
@@ -364,8 +361,6 @@ void broadcastGameState()
             data.scale = ast.scale;
             data.vel_x = ast.vel_x;
             data.vel_y = ast.vel_y;
-            data.isActive = true;
-            data.asteroidId = ast.id;
             gameObjects.push_back(data);
         }
     }

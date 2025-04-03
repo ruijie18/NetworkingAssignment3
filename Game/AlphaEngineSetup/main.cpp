@@ -22,7 +22,7 @@
 #include <atomic>
 #include <conio.h>
 #include <vector>
-#include <string>
+#include <cstring>
 #include <cmath>
 #include <mutex>
 #include <map>
@@ -49,14 +49,6 @@ constexpr int VICTORY_SCORE = 50; // Client based intended
 inline float Lerp(float a, float b, float t)
 {
     return a + (b - a) * t;
-}
-
-// ----------------------------------------------------------------------
-// Helper: Collision Check (Sphere to sphere) function
-// ----------------------------------------------------------------------
-bool checkSphereCollision(float x1, float y1, float r1, float x2, float y2, float r2)
-{
-    return (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) <= (r1 + r2) * (r1 + r2);
 }
 #pragma endregion
 
@@ -132,8 +124,6 @@ struct GameObjectData {
     float scale;
     float vel_x;      // Velocity X component.
     float vel_y;      // Velocity Y component.
-    uint32_t asteroidId;
-    bool isActive = false;
 };
 
 struct GameUpdatePacket {
@@ -210,7 +200,6 @@ struct GameObject
     uint32_t playerId = 0;  // Valid for player objects.
     uint32_t asteroidId = 0;
     bool isSent = false;
-    bool isActive = true;
 };
 
 enum ObjectType
@@ -223,10 +212,13 @@ enum ObjectType
 // Remote pool: all entities updated from the server.
 GameObject gRemoteEntities[MAX_REMOTE_OBJECTS];
 GameObject gServerEntityPool[MAX_REMOTE_OBJECTS]; // Temporary buffer from server. 
+std::atomic<uint32_t> gRemoteCount{ 0 };
+std::atomic<uint32_t> gBulletEntityCount{ 0 };
 
 // Local pool: stores local player and other local spawned objects.
 GameObject gLocalPlayer; // Local player object.
 GameObject gLocalEntities[MAX_LOCAL_ENTITIES];
+uint32_t gLocalEntityCount = 0;
 
 // Mutex for synchronizing access to both pools.
 std::mutex gPoolMutex;
@@ -258,6 +250,8 @@ s8	pFont;
 void SpawnLocalEntity(uint8_t objectType, float pos_x, float pos_y, float vel_x, float vel_y, float rotation, float scale)
 {
     std::lock_guard<std::mutex> lock(gPoolMutex);
+    if (gLocalEntityCount >= MAX_LOCAL_ENTITIES)
+        return; // Pool full.
 
     // Find an inactive object in the pool
     for (uint32_t i = 0; i < MAX_LOCAL_ENTITIES; ++i)
@@ -309,6 +303,7 @@ void SpawnBullet()
 #pragma endregion
 
 #pragma region Score Logic
+
 // ----------------------------------------------------------------------
 //  Score Increment Function
 // ----------------------------------------------------------------------
@@ -408,30 +403,8 @@ void RenderScoreboardText(int Location = 0)
 
 }
 
-#pragma endregion
 
-#pragma region Cleaning/Destroying Objects
-//void CleanupLocalEntities()
-//{
-//    std::lock_guard<std::mutex> lock(gPoolMutex);
-//    uint32_t i = 0;
-//    while (i < gLocalEntityCount.load())
-//    {
-//        if (!gLocalEntities[i].isActive)
-//        {
-//            // Swap with the last active element.
-//            gLocalEntities[i] = gLocalEntities[gLocalEntityCount - 1];
-//            gLocalEntityCount--;
-//            // Do not increment i; process the swapped element.
-//        }
-//        else
-//        {
-//            ++i;
-//        }
-//    }
-//}
-#pragma endregion
-
+#pragma end
 #pragma region Update Logic
 // ----------------------------------------------------------------------
 // UpdateLocalSimulation: Updates local simulation (player and local entities).
@@ -494,7 +467,7 @@ void UpdateLocalSimulation(float dt)
     // Update local entities (e.g., bullets) in the local pool.
     {
         std::lock_guard<std::mutex> lock(gPoolMutex);
-        for (uint32_t i = 0; i < MAX_LOCAL_ENTITIES; i++)
+        for (uint32_t i = 0; i < gLocalEntityCount; i++)
         {
             gLocalEntities[i].pos_x += gLocalEntities[i].vel_x * dt;
             gLocalEntities[i].pos_y += gLocalEntities[i].vel_y * dt;
@@ -660,17 +633,15 @@ void ReceiveThread(SOCKET socket)
                 if (poolIndex >= MAX_REMOTE_OBJECTS)
                     break;
 
-                gServerEntityPool[poolIndex].pos_x = src.pos_x;
-                gServerEntityPool[poolIndex].pos_y = src.pos_y;
-                gServerEntityPool[poolIndex].rotation = src.rotation;
-                gServerEntityPool[poolIndex].scale = src.scale;
-                gServerEntityPool[poolIndex].objectType = src.objectType;
-                gServerEntityPool[poolIndex].playerId = src.playerId;
-                gServerEntityPool[poolIndex].vel_x = src.vel_x;
-                gServerEntityPool[poolIndex].vel_y = src.vel_y;
-                gServerEntityPool[poolIndex].isActive = src.isActive; // or simply true if update means active
-                gServerEntityPool[poolIndex].asteroidId = src.asteroidId;
-                poolIndex++;
+                gServerEntityPool[remoteIndex].pos_x = src.pos_x;
+                gServerEntityPool[remoteIndex].pos_y = src.pos_y;
+                gServerEntityPool[remoteIndex].rotation = src.rotation;
+                gServerEntityPool[remoteIndex].scale = src.scale;
+                gServerEntityPool[remoteIndex].objectType = src.objectType;
+                gServerEntityPool[remoteIndex].playerId = src.playerId;
+                gServerEntityPool[remoteIndex].vel_x = src.vel_x;
+                gServerEntityPool[remoteIndex].vel_y = src.vel_y;
+                remoteIndex++;
             }
             // (Optional) You can store poolIndex somewhere if needed.
         }
@@ -805,8 +776,7 @@ void SendLocalUpdate(int clientId)
     multiPkt.count = 0;
     {
         std::lock_guard<std::mutex> lock(gPoolMutex);
-        // Loop through the entire local entity pool.
-        for (uint32_t i = 0; i < MAX_LOCAL_ENTITIES && multiPkt.count < 10; i++)
+        for (uint32_t i = 0; i < gLocalEntityCount && multiPkt.count < 10; i++)
         {
             if (gLocalEntities[i].objectType == ObjectType::Bullet &&
                 gLocalEntities[i].isActive &&
@@ -859,8 +829,6 @@ void UpdateRemoteInterpolation(float dt)
     // Process non-bullet remote objects (assumed in first half of pool).
     for (uint32_t i = 0; i < MAX_REMOTE_OBJECTS / 2; i++)
     {
-        if (!gRemoteEntities[i].isActive) continue;
-
         float targetPosX = gServerEntityPool[i].pos_x + gServerEntityPool[i].vel_x * extrapolationFactor;
         float targetPosY = gServerEntityPool[i].pos_y + gServerEntityPool[i].vel_y * extrapolationFactor;
         float targetRot = gServerEntityPool[i].rotation;
@@ -918,7 +886,7 @@ void Render()
     }
 
     // Render local entities (bullets, etc.).
-    for (uint32_t i = 0; i < MAX_LOCAL_ENTITIES; i++)
+    for (uint32_t i = 0; i < gLocalEntityCount; i++)
     {
         if (!gLocalEntities[i].isActive)
             continue;
@@ -947,21 +915,6 @@ void Render()
     // Render remote entities (non-bullets) from first half of remote pool.
     for (uint32_t i = 0; i < MAX_REMOTE_OBJECTS / 2; i++)
     {
-        if (!gRemoteEntities[i].isActive)
-            continue;
-
-
-        if (gRemoteEntities[i].objectType == ObjectType::Asteroid)
-        {
-            std::lock_guard<std::mutex> lock(destroyedMutex);
-            std::cout << "[RENDER] Asteroid ID: " << gRemoteEntities[i].asteroidId << "\n";
-            if (destroyedAsteroidIds.count(gRemoteEntities[i].asteroidId))
-            {
-                std::cout << "[DEBUG] Skipping asteroid ID " << gRemoteEntities[i].asteroidId << " during render\n";
-                continue; // Skip rendering this destroyed asteroid
-            }
-        }
-
         AEMtx33 scaleMtx, rotMtx, transMtx, finalMtx;
         AEMtx33Scale(&scaleMtx, gRemoteEntities[i].scale, gRemoteEntities[i].scale);
         AEMtx33Rot(&rotMtx, gRemoteEntities[i].rotation + (3.1415926f / 2.0f));
@@ -1129,25 +1082,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
         float dt = static_cast<float>(AEFrameRateControllerGetFrameTime());
 
-        switch (gameState)
-        {
-        case GameState::Playing:
-            UpdateLocalSimulation(dt);
-            SendLocalUpdate(myPlayerId);
-            UpdateRemoteInterpolation(dt);
-            Render();
-            break;
-
-        case GameState::Win:
-            scoreboardAnimTimer += dt; // Advance animation
-            if (scoreboardAnimTimer > scoreboardAnimDuration)
-                scoreboardAnimTimer = scoreboardAnimDuration;
-            RenderWinScreen();
-            break;
-
-        default:
-            break;
-        }
+        // Update local simulation (local player and local entities).
+        UpdateLocalSimulation(dt);
+        SendLocalUpdate(clientId);
+        // Interpolate remote entities.
+        UpdateRemoteInterpolation(dt);
+        // Render local and remote entities.
+        Render();
 
         AESysFrameEnd();
         if (AEInputCheckTriggered(AEVK_ESCAPE) || !AESysDoesWindowExist())

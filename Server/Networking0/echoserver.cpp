@@ -51,7 +51,7 @@ bool addressesEqual(const sockaddr_in& a, const sockaddr_in& b)
  //---------------------------------------------------------------------------------
 constexpr uint16_t SERVER_PORT = 9000;
 constexpr int MAX_PLAYERS = 4;
-constexpr int BUFFER_SIZE = 1024;
+constexpr int BUFFER_SIZE = 4096;
 constexpr float UPDATE_RATE = 0.033f; // ~30 updates per second
 constexpr int MAX_LOCAL_ENTITIES_SPAWN_RATE = 10;
 
@@ -69,12 +69,15 @@ enum PacketType : uint8_t
     BULLET_SPAWN = 0x06, // New packet type for bullet spawn.
     SCORE_INCREMENT = 0x07,
     SCORE_UPDATE = 0x08,
-    FINAL_SCOREBOARD = 0x09
+    FINAL_SCOREBOARD = 0x09,
+    DISCONNECT = 0x10,
+    NAME_REJECTED = 0x11   // ✅ new packet type
 };
 
 #pragma pack(push, 1)
 struct JoinRequestPacket {
     uint8_t type = JOIN_REQUEST;
+    char name[32];  // Max 31 characters + null terminator
 };
 
 struct JoinAcceptPacket {
@@ -125,7 +128,7 @@ struct GameUpdatePacket {
     uint8_t type = GAME_UPDATE;
     uint32_t objectCount;
     // Only players and asteroids are broadcast here.
-    GameObjectData objects[4000]; // Legacy placeholder.
+    GameObjectData objects[256]; // Legacy placeholder.
 };
 
 struct ScoreIncrementPacket {
@@ -160,12 +163,14 @@ enum ObjectType {
 
 struct PlayerEntity {
     uint32_t playerId;
+    char name[32];
     float pos_x, pos_y;
-    float rotation;  // Angle in radians.
+    float rotation;
     float scale;
     float health;
     float vel_x, vel_y;
 };
+
 
 struct AsteroidEntity {
     float pos_x, pos_y;
@@ -477,41 +482,75 @@ void gameLoop()
 //---------------------------------------------------------------------------------
 // Packet Handling Functions
 //---------------------------------------------------------------------------------
-void handleJoinRequest(const sockaddr_in& clientAddr)
+void handleJoinRequest(const sockaddr_in& clientAddr, const JoinRequestPacket* pkt)
 {
     std::lock_guard<std::mutex> clientsLock(clientsMutex);
-    // Ignore duplicate join requests.
+
+    // Check if same address already joined
     for (const auto& addr : clientAddresses)
     {
         if (addressesEqual(addr, clientAddr))
             return;
     }
+
+    // Check for duplicate name BEFORE assigning a new player
+    char incomingName[32];
+    memcpy(incomingName, pkt->name, sizeof(pkt->name));
+    incomingName[31] = '\0'; // Null-terminate for safety
+
+    {
+        std::lock_guard<std::mutex> stateLock(gameStateMutex);
+        for (const auto& [id, player] : players)
+        {
+            if (strcmp(player.name, incomingName) == 0)
+            {
+                std::cout << "[WARN] Duplicate name rejected: " << incomingName << std::endl;
+
+                // ✅ Inform client
+                uint8_t rejectMsg = NAME_REJECTED;
+                sendto(g_serverSocket,
+                    reinterpret_cast<char*>(&rejectMsg),
+                    sizeof(rejectMsg),
+                    0,
+                    reinterpret_cast<const sockaddr*>(&clientAddr),
+                    sizeof(clientAddr));
+                return;
+            }
+        }
+
+    }
+
     if (clientAddresses.size() >= MAX_PLAYERS)
     {
         std::cout << "[WARN] Max players reached. Ignoring join request." << std::endl;
         return;
     }
+
+    // Assign ID and register client
     uint32_t assignedId = nextPlayerId++;
     clientAddresses.push_back(clientAddr);
 
+    PlayerEntity newPlayer;
+    newPlayer.playerId = assignedId;
+    newPlayer.pos_x = 400.0f;
+    newPlayer.pos_y = 300.0f;
+    newPlayer.rotation = 0.0f;
+    newPlayer.scale = 100.0f;
+    newPlayer.health = 100.0f;
+    newPlayer.vel_x = 0.0f;
+    newPlayer.vel_y = 0.0f;
+    strncpy_s(newPlayer.name, pkt->name, sizeof(newPlayer.name));
+    newPlayer.name[sizeof(newPlayer.name) - 1] = '\0'; // Safe null-termination
+
     {
         std::lock_guard<std::mutex> stateLock(gameStateMutex);
-        PlayerEntity newPlayer;
-        newPlayer.playerId = assignedId;
-        newPlayer.pos_x = 400.0f;
-        newPlayer.pos_y = 300.0f;
-        newPlayer.rotation = 0.0f;
-        newPlayer.scale = 100.0f;
-        newPlayer.health = 100.0f;
-        newPlayer.vel_x = 0.0f;
-        newPlayer.vel_y = 0.0f;
         players[assignedId] = newPlayer;
     }
 
     JoinAcceptPacket response;
     response.playerId = assignedId;
     int bytesSent = sendto(g_serverSocket,
-        reinterpret_cast<char*>(&response),
+        reinterpret_cast<const char*>(&response),
         sizeof(response),
         0,
         reinterpret_cast<const sockaddr*>(&clientAddr),
@@ -520,8 +559,9 @@ void handleJoinRequest(const sockaddr_in& clientAddr)
     {
         std::cerr << "[ERROR] JOIN_ACCEPT sendto failed: " << WSAGetLastError() << std::endl;
     }
-    std::cout << "[INFO] Player " << assignedId << " joined from "
-        << inet_ntoa(clientAddr.sin_addr) << ":" << ntohs(clientAddr.sin_port) << std::endl;
+
+    std::cout << "[INFO] " << newPlayer.name << " joined as Player " << assignedId
+        << " from " << inet_ntoa(clientAddr.sin_addr) << ":" << ntohs(clientAddr.sin_port) << std::endl;
 }
 
 void handleScoreRequest(const char* buffer, int bytesReceived, const sockaddr_in& clientAddr)
@@ -587,7 +627,10 @@ void serverReceiveLoop(SOCKET serverSocket)
         switch (packetType)
         {
         case JOIN_REQUEST:
-            handleJoinRequest(clientAddr);
+            if (bytesReceived >= sizeof(JoinRequestPacket)) {
+                JoinRequestPacket* joinPkt = reinterpret_cast<JoinRequestPacket*>(buffer);
+                handleJoinRequest(clientAddr, joinPkt);
+            }
             break;
         case PLAYER_UPDATE:
             if (bytesReceived >= sizeof(PlayerUpdatePacket))
@@ -629,6 +672,31 @@ void serverReceiveLoop(SOCKET serverSocket)
         case SCORE_INCREMENT:
             handleScoreRequest(buffer, bytesReceived, clientAddr);
             break;
+        case DISCONNECT:
+        {
+            if (bytesReceived >= 5) {
+                uint32_t playerId;
+                memcpy(&playerId, buffer + 1, sizeof(uint32_t));
+                playerId = ntohl(playerId);
+
+                {
+                    std::lock_guard<std::mutex> lock(gameStateMutex);
+                    players.erase(playerId);
+                }
+
+                std::lock_guard<std::mutex> lock(clientsMutex);
+                for (auto it = clientAddresses.begin(); it != clientAddresses.end(); ++it) {
+                    if (addressesEqual(*it, clientAddr)) {
+                        clientAddresses.erase(it);
+                        break;
+                    }
+                }
+
+                std::cout << "[INFO] Player " << playerId << " disconnected and removed." << std::endl;
+            }
+            break;
+        }
+        
         default:
             std::cerr << "[WARN] Unknown packet type received: " << (int)packetType << std::endl;
             break;

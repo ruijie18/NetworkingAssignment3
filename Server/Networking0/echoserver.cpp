@@ -288,7 +288,7 @@ void relayBulletSpawnMulti(const BulletSpawnMultiPacket* multiPkt, size_t packet
     {
         int bytesSent = sendto(g_serverSocket,
             reinterpret_cast<const char*>(multiPkt),
-            packetSize,
+            static_cast<int>(sizeof(BulletSpawnMultiPacket)),
             0,
             reinterpret_cast<const sockaddr*>(&addr),
             sizeof(addr));

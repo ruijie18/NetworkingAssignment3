@@ -209,7 +209,7 @@ std::mutex destroyedMutex;
 // ----------------------------------------------------------------------
 struct GameObject
 {
-    AEMtx33 transform;  // For rendering.
+    AEMtx33 transform = { 0 };  // Zero-initialized matrix
     float pos_x = 0.0f, pos_y = 0.0f;
     float vel_x = 0.0f, vel_y = 0.0f;
     float scale = 1.0f;
